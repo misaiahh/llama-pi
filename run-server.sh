@@ -21,12 +21,13 @@ case "$MODEL_CONFIG" in
     ;;
   q6)
     # unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q6_K_XL
+    # Q6 uses ~1.5× RAM of Q4 — keep threads/ubatch/fit-target same as Q4
     HF_REPO="unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q6_K_XL"
-    THREADS=12
-    THREADS_BATCH=12
+    THREADS=6
+    THREADS_BATCH=6
     BATCH_SIZE=4096
-    UBATCH_SIZE=2048
-    FIT_TARGET=8192
+    UBATCH_SIZE=1024
+    FIT_TARGET=4096
     CACHE_TYPE_K="f16"
     CACHE_TYPE_V="f16"
     FLASH_ATTN="on"
