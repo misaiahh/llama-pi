@@ -146,17 +146,22 @@ npm install -g @mariozechner/pi-coding-agent
         {
           "id": "qwen3.6-35b-a3b",
           "name": "Qwen3.6-35B-A3B (local)",
-          "reasoning": false,
+          "reasoning": true,
           "input": ["text"],
           "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
           "contextWindow": 131072,
-          "maxTokens": 8192
+          "maxTokens": 8192,
+          "compat": {
+            "thinkingFormat": "openai"
+          }
         }
       ]
     }
   }
 }
 ```
+
+> **Note:** `reasoning: true` and `thinkingFormat: "openai"` are required because `run-server.sh` uses `--reasoning-budget 4096`, which causes the server to output thinking blocks. Without this config, pi doesn't know how to parse them and will retry indefinitely.
 
 ### 6.4 Verify Pi Connectivity
 

@@ -74,4 +74,5 @@ exec llama-server \
   --min-p 0.0 \
   --presence-penalty 0.0 \
   --mlock \
-  --prio 2
+  --prio 2 \
+  --reasoning-budget 4096
