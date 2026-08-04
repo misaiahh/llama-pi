@@ -13,7 +13,6 @@ case "$MODEL_CONFIG" in
     THREADS_BATCH=6
     BATCH_SIZE=4096
     UBATCH_SIZE=1024
-    FIT_TARGET=4096
     CACHE_TYPE_K="f16"
     CACHE_TYPE_V="f16"
     FLASH_ATTN="on"
@@ -21,13 +20,12 @@ case "$MODEL_CONFIG" in
     ;;
   q6)
     # unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q6_K_XL
-    # Q6 uses ~1.5× RAM of Q4 — keep threads/ubatch/fit-target same as Q4
+    # Q6 uses ~1.5× RAM of Q4 — keep threads/ubatch same as Q4
     HF_REPO="unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q6_K_XL"
     THREADS=6
     THREADS_BATCH=6
     BATCH_SIZE=4096
     UBATCH_SIZE=1024
-    FIT_TARGET=4096
     CACHE_TYPE_K="f16"
     CACHE_TYPE_V="f16"
     FLASH_ATTN="on"
@@ -42,12 +40,32 @@ esac
 # Kill any existing llama-server
 pkill llama-server 2>/dev/null || true
 
+# Disable Metal TurboFlash attention kernel.
+# On M5 Max (Apple10/Metal4) the TurboFlash two-pass fused attention kernel
+# produces corrupt output (typos/glued tokens) with flash-attn on. Fixed
+# upstream in llama.cpp commit a1bcb34 (default off), but that postdates the
+# installed build, so we force it off here. No perf regression per upstream.
+export TURBO_FLASH=0
+
 # Run the server natively (Metal on Apple Silicon)
 # Optimizations from benchmarks (M5 Max, 48 GB):
 #   --cache-type-k/v f16     → ~5% faster decode than q8_0
 #   --ubatch-size 1024       → faster prefill on long prompts
 #   --flash-attn on          → enabled for this model architecture
 #   --ctx-size 0             → use model's native context (262144)
+# Anti-loop setting (Qwen3.6-35B-A3B repetition/tool-call loops):
+#   --jinja                  → use model chat template so tool calls parse cleanly
+#                              (main fix for repeated/duplicated tool calls)
+# NOTE: token/phrase penalties (repeat-penalty, presence-penalty, DRY) were tried
+# here to break loops but they corrupt code output (typos/glued tokens), so sampling
+# is kept at Qwen's recommended values below.
+# --load-mode mmap: memory-map the model (do NOT mlock). mlock pins the whole
+# model (~38 GB for Q6) in RAM even when idle; mmap lets the OS reclaim idle
+# pages under memory pressure.
+# NOTE: with -ngl 999 the model holds the Metal GPU the whole time it runs, so
+# video on a DisplayLink (software) external monitor will freeze. This is GPU
+# contention, not a flag bug — stop the server when watching video:
+#   curl -X POST http://localhost:8000/stop   (or: pkill llama-server)
 exec llama-server \
   -hf "$HF_REPO" \
   --no-mmproj \
@@ -61,18 +79,17 @@ exec llama-server \
   --batch-size "$BATCH_SIZE" \
   --ubatch-size "$UBATCH_SIZE" \
   --ctx-size "$CTX_SIZE" \
-  --fit on \
-  --fit-target "$FIT_TARGET" \
+  --fit off \
   --cache-type-k "$CACHE_TYPE_K" \
   --cache-type-v "$CACHE_TYPE_V" \
   --cache-prompt \
-  --cache-reuse 256 \
   --parallel 1 \
   --temp 0.6 \
   --top-p 0.95 \
   --top-k 20 \
   --min-p 0.0 \
   --presence-penalty 0.0 \
-  --mlock \
+  --jinja \
+  --load-mode mmap \
   --prio 2 \
   --reasoning-budget 4096
