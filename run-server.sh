@@ -9,6 +9,7 @@ case "$MODEL_CONFIG" in
     # unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M
     # Benchmark winner: f16 KV + ubatch 1024 + flash-attn on
     HF_REPO="unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M"
+    QUANT="UD-Q4_K_M"
     THREADS=6
     THREADS_BATCH=6
     BATCH_SIZE=4096
@@ -22,6 +23,7 @@ case "$MODEL_CONFIG" in
     # unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q6_K_XL
     # Q6 uses ~1.5× RAM of Q4 — keep threads/ubatch same as Q4
     HF_REPO="unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q6_K_XL"
+    QUANT="UD-Q6_K_XL"
     THREADS=6
     THREADS_BATCH=6
     BATCH_SIZE=4096
@@ -39,6 +41,51 @@ esac
 
 # Kill any existing llama-server
 pkill llama-server 2>/dev/null || true
+
+# ── Resolve model source: prefer a local .gguf (offline) over -hf download ──
+# Some networks block Hugging Face; -hf then returns an HTML block page that
+# llama.cpp can't parse. If the model is already downloaded we use -m instead,
+# so no network call is made at boot.
+#
+# Resolution order:
+#   1. LLAMA_MODEL_PATH env var (explicit path — highest priority)
+#   2. Auto-detect a matching *$QUANT*.gguf in the standard llama.cpp/HF caches
+#   3. Fall back to -hf "$HF_REPO" (requires network / unblocked HF access)
+MODEL_ARGS=()
+if [[ -n "${LLAMA_MODEL_PATH:-}" ]]; then
+  if [[ ! -f "$LLAMA_MODEL_PATH" ]]; then
+    echo "ERROR: LLAMA_MODEL_PATH set but file not found: $LLAMA_MODEL_PATH" >&2
+    exit 1
+  fi
+  echo "Using model (LLAMA_MODEL_PATH): $LLAMA_MODEL_PATH"
+  MODEL_ARGS=(-m "$LLAMA_MODEL_PATH")
+else
+  LOCAL_MODEL=""
+  for cache_dir in \
+    "$HOME/.cache/llama.cpp" \
+    "$HOME/Library/Caches/llama.cpp" \
+    "$HOME/.cache/huggingface/hub" \
+    "$HOME/Library/Caches/huggingface"; do
+    [[ -d "$cache_dir" ]] || continue
+    # Match *.gguf containing the quant tag. Use -L so symlinks (the HF hub
+    # cache stores snapshots/<hash>/*.gguf as symlinks into blobs/) are followed,
+    # and sort so the first shard (…-00001-of-000NN.gguf) wins for split models.
+    found=$(find -L "$cache_dir" -iname "*${QUANT}*.gguf" 2>/dev/null | sort | head -1)
+    if [[ -n "$found" ]]; then
+      LOCAL_MODEL="$found"
+      break
+    fi
+  done
+
+  if [[ -n "$LOCAL_MODEL" ]]; then
+    echo "Using local model (offline): $LOCAL_MODEL"
+    MODEL_ARGS=(-m "$LOCAL_MODEL")
+  else
+    echo "No local $QUANT .gguf found in caches; falling back to -hf download." >&2
+    echo "  (If this network blocks Hugging Face, set LLAMA_MODEL_PATH to the .gguf path.)" >&2
+    MODEL_ARGS=(-hf "$HF_REPO")
+  fi
+fi
 
 # Disable Metal TurboFlash attention kernel.
 # On M5 Max (Apple10/Metal4) the TurboFlash two-pass fused attention kernel
@@ -59,15 +106,16 @@ export TURBO_FLASH=0
 # NOTE: token/phrase penalties (repeat-penalty, presence-penalty, DRY) were tried
 # here to break loops but they corrupt code output (typos/glued tokens), so sampling
 # is kept at Qwen's recommended values below.
-# --load-mode mmap: memory-map the model (do NOT mlock). mlock pins the whole
-# model (~38 GB for Q6) in RAM even when idle; mmap lets the OS reclaim idle
-# pages under memory pressure.
+# Memory-mapping is the default load mode (we do NOT pass --mlock, which would
+# pin the whole model (~38 GB for Q6) in RAM even when idle). The --load-mode
+# flag is intentionally omitted: it only exists on newer llama.cpp builds and
+# errors on older ones, so relying on the mmap default keeps this portable.
 # NOTE: with -ngl 999 the model holds the Metal GPU the whole time it runs, so
 # video on a DisplayLink (software) external monitor will freeze. This is GPU
 # contention, not a flag bug — stop the server when watching video:
 #   curl -X POST http://localhost:8000/stop   (or: pkill llama-server)
 exec llama-server \
-  -hf "$HF_REPO" \
+  "${MODEL_ARGS[@]}" \
   --no-mmproj \
   --alias claude-sonnet-4-6,sonnet,opus,haiku,local \
   --host 0.0.0.0 \
@@ -90,6 +138,5 @@ exec llama-server \
   --min-p 0.0 \
   --presence-penalty 0.0 \
   --jinja \
-  --load-mode mmap \
   --prio 2 \
   --reasoning-budget 4096
